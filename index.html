@@ -115,6 +115,21 @@
     .live-sky .sky-wrap { flex: 1; position: relative; min-height: 0; }
     .live-sky canvas { display: block; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
     .live-sky .cap { font-size: 11px; color: #b0b6e0; text-align: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    /* ドップラー補正（ISS-Alert と同じ表示） */
+    .dop-box {
+      margin-top: 10px; background: #11112e; border: 1px solid #22224a;
+      border-radius: 8px; padding: 8px 12px;
+    }
+    .dop-head { display: flex; align-items: center; gap: 8px; color: #9ca3d8; font-size: 12px; }
+    .dop-tag { margin-left: auto; white-space: nowrap; font-size: 11px; padding: 1px 7px; border-radius: 3px; background: #22224a; color: #9ca3d8; }
+    .dop-tag.up { background: #14532d; color: #4ade80; }
+    .dop-freq {
+      font-size: 30px; font-weight: 700; line-height: 1.15; color: #eef0ff;
+      font-variant-numeric: tabular-nums; text-align: center;
+    }
+    .dop-freq span { font-size: 15px; font-weight: 400; color: #a0a8e0; margin-left: 4px; }
+    .dop-freq.below { color: #7880c8; }
+    .dop-sub { font-size: 12px; color: #b0b6e0; text-align: center; font-variant-numeric: tabular-nums; }
     .live-box label { display: block; color: #9ca3d8; font-size: 12px; margin-bottom: 2px; }
     .live-box .v    { color: #b0bcff; font-weight: 600; font-size: 15px; font-variant-numeric: tabular-nums; }
 
@@ -313,6 +328,14 @@
       <div class="sky-wrap"><canvas id="liveSky" data-size="118"></canvas></div>
       <div class="cap" id="liveSkyCap">次のパス</div>
     </div>
+  </div>
+  <div class="dop-box">
+    <div class="dop-head">
+      <span>レピーター下り 437.800 MHz 補正値</span>
+      <span class="dop-tag" id="dopTag"></span>
+    </div>
+    <div class="dop-freq" id="dopFreq">---.-----<span>MHz</span></div>
+    <div class="dop-sub" id="dopSub">—</div>
   </div>
 </div>
 
@@ -835,6 +858,42 @@ function drawLiveSky() {
   liveSkyFast = !!look;
 }
 let liveSkyFast = false;
+
+/* ── ダウンリンクのドップラー補正（ISS-Alert と同じ計算） ── */
+// 距離変化率 rr（遠ざかる向きが正）から受信周波数 f = f0 × (1 − rr / c) を求める。
+// 観測地点は ECF → ECI に回し、地球の自転による速度も入れる
+const DOWNLINK_HZ = 437.800e6;    // クロスバンドレピーターの下り
+const C_KMS   = 299792.458;
+const OMEGA_E = 7.292115e-5;     // 地球の自転角速度 [rad/s]
+function doppler(date, f0) {
+  const pv = satellite.propagate(satrec, date);
+  if (!pv.position || pv.position.x === null || !pv.velocity) return null;
+  const gmst = satellite.gstime(date);
+  const o = satellite.geodeticToEcf(OBSERVER);
+  const c = Math.cos(gmst), s = Math.sin(gmst);
+  const ox = o.x * c - o.y * s, oy = o.x * s + o.y * c, oz = o.z;
+  const dx = pv.position.x - ox, dy = pv.position.y - oy, dz = pv.position.z - oz;
+  const range = Math.hypot(dx, dy, dz);
+  const rr = (dx * (pv.velocity.x + OMEGA_E * oy) + dy * (pv.velocity.y - OMEGA_E * ox) + dz * pv.velocity.z) / range;
+  return { hz: f0 * (1 - rr / C_KMS), range, rr };
+}
+function updateDoppler() {
+  if (!satrec) return;
+  const now = new Date();
+  const f0 = DOWNLINK_HZ;
+  const d = doppler(now, f0), look = lookAngles(satrec, now);
+  if (!d || !look) return;
+  const up = look.el >= 0;
+  const shift = (d.hz - f0) / 1000;
+  const sign = v => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2);
+  const freq = document.getElementById('dopFreq'), tag = document.getElementById('dopTag');
+  freq.firstChild.textContent = (d.hz / 1e6).toFixed(5);
+  freq.classList.toggle('below', !up);
+  document.getElementById('dopSub').textContent = `シフト ${sign(shift)} kHz・距離 ${d.range.toFixed(0)} km（${sign(d.rr)} km/s）`;
+  tag.textContent = up ? '📡 地平線上' : '地平線下';
+  tag.classList.toggle('up', up);
+}
+
 let lastSec = -1;
 setInterval(() => {
   const now = new Date();
@@ -846,6 +905,7 @@ setInterval(() => {
     if (!selectedPassNear()) drawSelectedSky();   // 通過中以外は 1 秒ごと（カウントダウン表示）
   }
   if (selectedPassNear()) drawSelectedSky();
+  updateDoppler();     // 最接近の前後は 1 秒に数十 Hz 以上変わるので 0.2 秒ごとに更新
 }, 200);
 function selectedPassNear() {
   const p = selectedPass, now = Date.now();
